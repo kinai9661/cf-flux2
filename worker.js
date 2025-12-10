@@ -1,32 +1,33 @@
 /**
  * =================================================================================
  * 項目: Cloudflare FLUX.2 Workers AI API
- * 版本: 1.1.1
+ * 版本: 1.2.0
  * 作者: kinai9661
  * 說明: 使用 REST API 調用 Cloudflare Workers AI FLUX.2 [dev] 模型
+ *       支持多賬號故障轉移策略，突破單賬號限制
  * 博客: https://blog.cloudflare.com/flux-2-workers-ai/
  * =================================================================================
  */
 
 const CONFIG = {
   PROJECT_NAME: "FLUX.2 Workers AI",
-  VERSION: "1.1.1",
+  VERSION: "1.2.0",
   API_MASTER_KEY: "1",
   CF_FLUX_MODEL: "@cf/black-forest-labs/flux-2-dev",
   DEFAULT_STEPS: 25,
   DEFAULT_WIDTH: 1024,
   DEFAULT_HEIGHT: 1024,
-  MAX_INPUT_IMAGES: 4
+  MAX_INPUT_IMAGES: 4,
+  MAX_ACCOUNTS: 10 // 最大支持 10 個賬號
 };
 
 export default {
   async fetch(request, env, ctx) {
     try {
       const apiKey = env.API_MASTER_KEY || CONFIG.API_MASTER_KEY;
-      const cfToken = env.CF_API_TOKEN;
-      const cfAccount = env.CF_ACCOUNT_ID || env.ACCOUNT;
+      const accounts = getAvailableAccounts(env);
       
-      request.ctx = { apiKey, cfToken, cfAccount, env };
+      request.ctx = { apiKey, accounts, env };
       const url = new URL(request.url);
       
       if (request.method === 'OPTIONS') {
@@ -41,10 +42,10 @@ export default {
         return new Response(JSON.stringify({
           status: 'ok',
           version: CONFIG.VERSION,
-          mode: cfToken && cfAccount ? 'REST API' : 'Not Configured',
+          mode: 'Multi-Account Fallback Strategy',
           model: CONFIG.CF_FLUX_MODEL,
-          account_configured: !!cfAccount,
-          token_configured: !!cfToken
+          total_accounts: accounts.length,
+          accounts_configured: accounts.map(a => `Account ${a.index}`)
         }), {
           headers: corsHeaders({ 'Content-Type': 'application/json' })
         });
@@ -61,6 +62,26 @@ export default {
     }
   }
 };
+
+// 獲取所有可用的賬號配置
+function getAvailableAccounts(env) {
+  const accounts = [];
+  
+  for (let i = 1; i <= CONFIG.MAX_ACCOUNTS; i++) {
+    const token = env[`CF_API_TOKEN_${i}`];
+    const accountId = env[`ACCOUNT_${i}`];
+    
+    if (token && accountId) {
+      accounts.push({
+        index: i,
+        token: token,
+        accountId: accountId
+      });
+    }
+  }
+  
+  return accounts;
+}
 
 async function handleApi(request) {
   try {
@@ -101,21 +122,16 @@ async function handleApi(request) {
 
 async function handleImageGeneration(request) {
   try {
-    const { cfToken, cfAccount } = request.ctx;
+    const accounts = request.ctx.accounts;
     
-    // 檢查必需的環境變量
-    if (!cfToken) {
-      return jsonError('CF_API_TOKEN environment variable is required', 500);
-    }
-    
-    if (!cfAccount) {
-      return jsonError('CF_ACCOUNT_ID or ACCOUNT environment variable is required', 500);
+    if (!accounts || accounts.length === 0) {
+      return jsonError('No Cloudflare accounts configured. Please add CF_API_TOKEN_X and ACCOUNT_X environment variables (X = 1, 2, 3...).', 500);
     }
     
     const contentType = request.headers.get('content-type') || '';
     let prompt, inputImages = [], steps, width, height, seed;
     
-    // 處理 multipart/form-data（支持圖片上傳）
+    // 處理 multipart/form-data
     if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
       prompt = formData.get('prompt');
@@ -124,7 +140,6 @@ async function handleImageGeneration(request) {
       height = parseInt(formData.get('height')) || CONFIG.DEFAULT_HEIGHT;
       seed = formData.get('seed') ? parseInt(formData.get('seed')) : undefined;
       
-      // 收集上傳的圖片
       for (let i = 0; i < CONFIG.MAX_INPUT_IMAGES; i++) {
         const img = formData.get(`input_image_${i}`);
         if (img && img instanceof Blob) {
@@ -132,12 +147,11 @@ async function handleImageGeneration(request) {
         }
       }
     } 
-    // 處理 JSON（標準格式）
+    // 處理 JSON
     else {
       const body = await request.json();
       prompt = body.prompt || body.input;
       
-      // 如果 prompt 是對象，轉換為 JSON 字符串
       if (typeof prompt === 'object') {
         prompt = JSON.stringify(prompt);
       }
@@ -147,7 +161,6 @@ async function handleImageGeneration(request) {
       height = body.height || CONFIG.DEFAULT_HEIGHT;
       seed = body.seed;
       
-      // 處理 base64 圖片
       if (body.images && Array.isArray(body.images)) {
         for (const imgData of body.images.slice(0, CONFIG.MAX_INPUT_IMAGES)) {
           if (imgData.startsWith('data:image')) {
@@ -169,67 +182,24 @@ async function handleImageGeneration(request) {
     
     console.log('Generation request:', {
       prompt: prompt.substring(0, 100),
-      steps,
-      width,
-      height,
-      seed,
-      inputImagesCount: inputImages.length
+      steps, width, height, seed,
+      inputImagesCount: inputImages.length,
+      availableAccounts: accounts.length
     });
     
-    // 構建 API URL
-    const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${cfAccount}/ai/run/${CONFIG.CF_FLUX_MODEL}`;
-    console.log('API URL:', apiUrl);
-    
-    // 構建請求 FormData
-    const form = new FormData();
-    form.append('prompt', prompt);
-    form.append('steps', steps.toString());
-    form.append('width', width.toString());
-    form.append('height', height.toString());
-    if (seed) form.append('seed', seed.toString());
-    
-    // 添加參考圖片
-    inputImages.forEach((img, i) => {
-      form.append(`input_image_${i}`, img);
+    // 使用故障轉移策略生成圖像
+    const result = await generateWithFallback(accounts, {
+      prompt, inputImages, steps, width, height, seed
     });
     
-    // 調用 Cloudflare API
-    console.log('Calling Cloudflare API...');
-    const res = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${cfToken}`
-      },
-      body: form
-    });
-    
-    console.log('API response status:', res.status);
-    
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error('API error response:', errorText);
-      throw new Error(`Cloudflare API error (${res.status}): ${errorText}`);
-    }
-    
-    const result = await res.json();
-    console.log('API response received successfully');
-    
-    // 提取圖片數據
-    const imageData = result.result?.image || result.image || result.result;
-    
-    if (!imageData) {
-      console.error('No image data in response:', result);
-      throw new Error('No image data in API response');
-    }
-    
-    // 返回標準格式響應
     return new Response(JSON.stringify({
       id: crypto.randomUUID(),
       object: 'image.generation',
       created: Math.floor(Date.now() / 1000),
       model: CONFIG.CF_FLUX_MODEL,
+      account_used: result.accountUsed,
       data: [{
-        b64_json: imageData,
+        b64_json: result.imageData,
         prompt: prompt,
         revised_prompt: prompt
       }]
@@ -239,16 +209,102 @@ async function handleImageGeneration(request) {
     
   } catch (e) {
     console.error('Generation error:', e);
-    console.error('Error stack:', e.stack);
     return jsonError(`Generation failed: ${e.message}`, 500);
   }
+}
+
+// 故障轉移策略：嘗試所有賬號直到成功
+async function generateWithFallback(accounts, params) {
+  let lastError = null;
+  let attemptedAccounts = [];
+  
+  for (const account of accounts) {
+    try {
+      console.log(`⚙️ Trying Account ${account.index}...`);
+      attemptedAccounts.push(account.index);
+      
+      const result = await callCloudflareAPI(account, params);
+      
+      console.log(`✅ Success with Account ${account.index}`);
+      return {
+        imageData: result,
+        accountUsed: account.index
+      };
+      
+    } catch (error) {
+      console.error(`❌ Account ${account.index} failed: ${error.message}`);
+      lastError = error;
+      
+      // 檢查是否為速率限制或配額錯誤
+      const errorMsg = error.message.toLowerCase();
+      const isRateLimit = errorMsg.includes('429') || 
+                          errorMsg.includes('quota') || 
+                          errorMsg.includes('rate limit') ||
+                          errorMsg.includes('too many requests');
+      
+      if (isRateLimit) {
+        console.log(`🔄 Account ${account.index} rate limited, trying next account...`);
+        continue; // 嘗試下一個賬號
+      }
+      
+      // 其他錯誤（非配額問題），直接拋出
+      throw error;
+    }
+  }
+  
+  // 所有賬號都失敗
+  throw new Error(
+    `All ${accounts.length} accounts exhausted. ` +
+    `Attempted accounts: [${attemptedAccounts.join(', ')}]. ` +
+    `Last error: ${lastError?.message || 'Unknown error'}`
+  );
+}
+
+// 調用 Cloudflare API
+async function callCloudflareAPI(account, params) {
+  const { prompt, inputImages, steps, width, height, seed } = params;
+  
+  const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${account.accountId}/ai/run/${CONFIG.CF_FLUX_MODEL}`;
+  
+  const form = new FormData();
+  form.append('prompt', prompt);
+  form.append('steps', steps.toString());
+  form.append('width', width.toString());
+  form.append('height', height.toString());
+  if (seed) form.append('seed', seed.toString());
+  
+  inputImages.forEach((img, i) => {
+    form.append(`input_image_${i}`, img);
+  });
+  
+  const res = await fetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${account.token}`
+    },
+    body: form
+  });
+  
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Cloudflare API error (${res.status}): ${errorText}`);
+  }
+  
+  const result = await res.json();
+  const imageData = result.result?.image || result.image || result.result;
+  
+  if (!imageData) {
+    throw new Error('No image data in API response');
+  }
+  
+  return imageData;
 }
 
 function handleUI(request) {
   const origin = new URL(request.url).origin;
   const key = request.ctx.apiKey;
-  const { cfToken, cfAccount } = request.ctx;
-  const isConfigured = !!(cfToken && cfAccount);
+  const accounts = request.ctx.accounts;
+  const isConfigured = accounts && accounts.length > 0;
   
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -310,12 +366,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="header">
 <div class="title">🎨 ${CONFIG.PROJECT_NAME}</div>
 <div class="subtitle">Powered by Cloudflare Workers AI • Model: ${CONFIG.CF_FLUX_MODEL}</div>
-<div class="status ${isConfigured ? 'ok' : 'error'}">配置狀態: ${isConfigured ? '✅ 已配置' : '❌ 未配置 API Token'}</div>
+<div class="status ${isConfigured ? 'ok' : 'error'}">${isConfigured ? `✅ ${accounts.length} 個賬號已配置` : '❌ 未配置賬號'}</div>
 </div>
 
 <div class="container">
 <aside class="sidebar">
-${!isConfigured ? '<div class="info-box" style="background:rgba(239,68,68,.1);border-left-color:#ef4444"><strong>⚠️ 環境變量未配置</strong><br>請在 wrangler.toml 中配置:<br>• CF_API_TOKEN<br>• CF_ACCOUNT_ID 或 ACCOUNT</div>' : ''}
+${!isConfigured ? '<div class="info-box" style="background:rgba(239,68,68,.1);border-left-color:#ef4444"><strong>⚠️ 環境變量未配置</strong><br>請配置至少一組：<br>• CF_API_TOKEN_1<br>• ACCOUNT_1<br><br>可配置多組以突破限制！</div>' : `<div class="info-box" style="background:rgba(16,185,129,.1);border-left-color:#10b981"><strong>🔄 故障轉移模式</strong><br>已配置 ${accounts.length} 個賬號<br>當某個賬號達到限制時<br>會自動切換到下一個！</div>`}
 
 <div class="info-box">
 <strong>✨ FLUX.2 [dev] 特性</strong><br>
@@ -323,7 +379,7 @@ ${!isConfigured ? '<div class="info-box" style="background:rgba(239,68,68,.1);bo
 • 角色一致性保持<br>
 • JSON 高級提示詞<br>
 • 最大 4MP 輸出<br>
-• REST API 調用
+• 智能故障轉移
 </div>
 
 <div class="card">
@@ -460,7 +516,7 @@ async function generate() {
   const result = document.getElementById('result');
   btn.disabled = true;
   btn.innerHTML = '<span class="loading"></span> 生成中...';
-  result.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">正在生成圖像，請稍候...</div>';
+  result.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">正在生成圖像，如遇配額限制會自動切換賬號...</div>';
   
   try {
     const form = new FormData();
@@ -503,10 +559,11 @@ async function generate() {
     
     if (data.data && data.data[0]) {
       const imgSrc = 'data:image/png;base64,' + data.data[0].b64_json;
+      const accountUsed = data.account_used || '未知';
       
       result.innerHTML = \`
         <div style="background:var(--card);padding:20px;border-radius:10px;border:1px solid var(--border)">
-          <div style="margin-bottom:12px;font-weight:600;color:var(--success)">✅ 生成成功！</div>
+          <div style="margin-bottom:12px;font-weight:600;color:var(--success)">✅ 生成成功！（使用賬號 ${accountUsed}）</div>
           <img src="\${imgSrc}" class="result-image">
           <div style="margin-top:16px">
             <a href="\${imgSrc}" download="flux2-\${Date.now()}.png" style="color:var(--primary);text-decoration:none;font-weight:600">📥 下載圖片</a>
