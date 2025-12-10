@@ -1,12 +1,12 @@
 # 🎨 Cloudflare FLUX.2 Workers AI API
 
-> 基於 Cloudflare Workers AI 的 FLUX.2 [dev] 圖像生成 API，支持多圖輸入、角色一致性和 JSON 高級提示詞控制。
+> 基於 Cloudflare Workers AI 的 FLUX.2 [dev] 圖像生成 API，使用 REST API 調用，支持多圖輸入、角色一致性和 JSON 高級提示詞控制。
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kinai9661/cf-flux2)
 
 ## ✨ 特性
 
-- 🚀 **雙模式部署**：支持 AI Binding 和 REST API 兩種方式
+- 🚀 **REST API 調用**：使用官方 Cloudflare API 調用 FLUX.2 [dev] 模型
 - 🖼️ **多圖輸入**：支持最多 4 張參考圖片，實現角色/產品一致性
 - 📝 **JSON Prompting**：支持結構化 JSON 提示詞進行精確控制
 - 🎯 **靈活尺寸**：支持最大 4MP 輸出（如 2048×2048、1920×1080 等）
@@ -14,15 +14,73 @@
 - 🔌 **API 兼容**：兼容 OpenAI 圖像生成 API 格式
 - ⚡ **極速部署**：一鍵部署到 Cloudflare Workers
 - 🔒 **安全可靠**：API Key 驗證保護
+- 📊 **健康檢查**：內置 `/health` 端點監控狀態
 
 ## 🚀 快速開始
 
-### 方式 1：AI Binding（推薦）
+### 前置要求
 
-**優點**：無需 API Token，開箱即用，性能最佳
+1. **Cloudflare 賬戶**（免費即可）
+2. **Cloudflare API Token**
+3. **Cloudflare Account ID**
+
+### 步驟 1：獲取 Cloudflare 憑證
+
+#### 1.1 獲取 Account ID
+
+1. 登錄 [Cloudflare Dashboard](https://dash.cloudflare.com/)
+2. 選擇任意網站/域名（如果沒有，可以添加一個免費域名）
+3. 在頁面右側欄找到 **"Account ID"**
+4. 點擊複製（格式類似：`a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`）
+
+![Account ID 位置](https://developers.cloudflare.com/assets/account-id-workers-dashboard_hu4ca67852fb6e50c49bfaaae951c7e6a7_187167_1252x376_resize_q75_box-1729113493.jpg)
+
+#### 1.2 創建 API Token
+
+1. 登錄 [Cloudflare Dashboard](https://dash.cloudflare.com/)
+2. 點擊右上角頭像 → **My Profile**
+3. 選擇左側 **API Tokens** 標籤
+4. 點擊 **Create Token**
+5. 選擇 **"Edit Cloudflare Workers"** 模板
+6. 或創建自定義 Token，確保權限包含：
+   - `Account.Workers AI:Read`
+   - `Account.Workers Scripts:Edit`
+7. 點擊 **Continue to summary** → **Create Token**
+8. **立即複製 Token**（只會顯示一次！）
+
+### 步驟 2：部署到 Cloudflare Workers
+
+#### 方法 A：通過 Cloudflare Dashboard（推薦，無需本地環境）
+
+1. **Fork 本倉庫**到您的 GitHub 賬戶
+
+2. **連接 GitHub**：
+   - 登錄 [Cloudflare Dashboard](https://dash.cloudflare.com/)
+   - 進入 **Workers & Pages**
+   - 點擊 **Create application** → **Pages** → **Connect to Git**
+   - 授權並選擇 `cf-flux2` 倉庫
+
+3. **配置環境變量**：
+   - 在部署設置頁面，找到 **Environment variables**
+   - 添加以下變量：
+
+   ```
+   CF_API_TOKEN = 粘貼您的 Cloudflare API Token
+   ACCOUNT = 粘貼您的 Account ID
+   API_MASTER_KEY = 自定義密鑰（如：my-secret-key-123）
+   ```
+
+4. **部署**：
+   - 點擊 **Save and Deploy**
+   - 等待部署完成
+
+5. **訪問**：
+   - 部署成功後，訪問分配的 Workers 域名
+
+#### 方法 B：本地部署（需要 Node.js）
 
 ```bash
-# 1. 克隆項目
+# 1. 克隆倉庫
 git clone https://github.com/kinai9661/cf-flux2.git
 cd cf-flux2
 
@@ -32,47 +90,65 @@ npm install -g wrangler
 # 3. 登錄 Cloudflare
 wrangler login
 
-# 4. 編輯 wrangler.toml，修改 API_MASTER_KEY
-# API_MASTER_KEY = "your-secret-key-here"
+# 4. 創建 .dev.vars 文件（不要提交到 Git）
+cat > .dev.vars << EOF
+CF_API_TOKEN=你的API_Token
+ACCOUNT=你的Account_ID
+API_MASTER_KEY=自定義密鑰
+EOF
 
 # 5. 部署
 wrangler deploy
 ```
 
-### 方式 2：REST API
+### 步驟 3：配置環境變量（如果使用 Workers）
 
-**適用場景**：需要更靈活的 API 調用
+如果直接部署為 Worker（而非 Pages）：
 
-1. 在 `wrangler.toml` 中添加環境變量：
-
-```toml
-[vars]
-API_MASTER_KEY = "your-secret-key"
-CF_API_TOKEN = "your-cloudflare-api-token"
-CF_ACCOUNT_ID = "your-cloudflare-account-id"
-```
-
-2. 註釋掉或刪除 `[[ai]]` 配置
-3. 運行 `wrangler deploy`
+1. 進入 **Workers & Pages** → 選擇您的 Worker
+2. 點擊 **Settings** → **Variables**
+3. 添加環境變量：
+   - `CF_API_TOKEN`：您的 Cloudflare API Token
+   - `ACCOUNT`：您的 Account ID
+   - `API_MASTER_KEY`：自定義 API 密鑰
+4. 點擊 **Save and deploy**
 
 ## 📖 使用指南
 
 ### Web UI 界面
 
-部署後訪問您的 Workers 域名，即可看到現代化的 Web 界面：
+訪問您的 Workers 域名，即可看到現代化的 Web 界面：
 
-- 📝 輸入提示詞（支持 JSON 格式）
-- 🖼️ 上傳最多 4 張參考圖片
-- 📐 選擇圖片尺寸（1024×1024、1920×1080 等）
-- ⚙️ 調整生成參數（Steps、Seed）
-- ✨ 一鍵生成和下載
+1. **配置狀態指示器**
+   - ✅ 綠色：環境變量已正確配置
+   - ❌ 紅色：缺少必需的環境變量
+
+2. **輸入提示詞**
+   - 支持純文本描述
+   - 支持 JSON 格式高級控制
+
+3. **上傳參考圖片**（可選）
+   - 拖拽或點擊上傳
+   - 最多 4 張圖片
+   - 保持角色/產品一致性
+
+4. **選擇圖片尺寸**
+   - 預設多種常用尺寸
+   - 1024×1024 到 1920×1080
+
+5. **調整生成參數**
+   - Steps：推薦 25（範圍 10-50）
+   - Seed：可選，固定結果用
+
+6. **生成與下載**
+   - 點擊生成按鈕
+   - 完成後可直接下載
 
 ### API 調用示例
 
-#### cURL
+#### 基礎文本生成
 
 ```bash
-# 基礎文本生成
 curl https://your-worker.workers.dev/v1/images/generations \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
@@ -82,8 +158,11 @@ curl https://your-worker.workers.dev/v1/images/generations \
     "width": 1024,
     "height": 1024
   }'
+```
 
-# 帶參考圖片（multipart/form-data）
+#### 帶參考圖片（multipart/form-data）
+
+```bash
 curl https://your-worker.workers.dev/v1/images/generations \
   -H "Authorization: Bearer your-api-key" \
   -F "prompt=A cyberpunk portrait of the person in the image" \
@@ -93,7 +172,7 @@ curl https://your-worker.workers.dev/v1/images/generations \
   -F "height=1024"
 ```
 
-#### Python
+#### Python 示例
 
 ```python
 import requests
@@ -127,7 +206,6 @@ response = requests.post(url, json=payload, headers=headers)
 data = response.json()
 
 if data.get("data"):
-    # 保存 base64 圖片
     img_base64 = data["data"][0]["b64_json"]
     with open("output.png", "wb") as f:
         f.write(base64.b64decode(img_base64))
@@ -169,8 +247,6 @@ console.log('✅ 生成成功！', data);
 
 ### JSON 結構化提示詞
 
-FLUX.2 支持結構化 JSON 提示詞進行更精確的控制：
-
 ```json
 {
   "prompt": {
@@ -207,8 +283,6 @@ FLUX.2 支持結構化 JSON 提示詞進行更精確的控制：
 
 ### 多圖輸入（角色一致性）
 
-上傳多張參考圖片，保持角色/產品一致性：
-
 ```bash
 curl https://your-worker.workers.dev/v1/images/generations \
   -H "Authorization: Bearer your-api-key" \
@@ -233,9 +307,17 @@ curl https://your-worker.workers.dev/v1/images/generations \
 | 1920×1080 | 16:9 | 高清壁紙 |
 | 2048×2048 | 1:1 | 高分辨率輸出 |
 
-## ⚙️ 配置說明
+## 🔧 配置說明
 
-### wrangler.toml
+### 環境變量
+
+| 變量 | 必需 | 說明 | 獲取方式 |
+|------|------|------|----------|
+| `CF_API_TOKEN` | ✅ 是 | Cloudflare API Token | Dashboard → Profile → API Tokens → Create Token |
+| `ACCOUNT` | ✅ 是 | Cloudflare Account ID | Dashboard → 任意網站 → 右側欄 Account ID |
+| `API_MASTER_KEY` | ✅ 是 | API 訪問密鑰 | 自定義設置 |
+
+### wrangler.toml 示例
 
 ```toml
 name = "flux2-workers-ai"
@@ -244,25 +326,34 @@ compatibility_date = "2024-12-10"
 
 [vars]
 API_MASTER_KEY = "your-secret-key-here"
-
-# 方式 1：AI Binding（推薦）
-[[ai]]
-binding = "AI"
-
-# 方式 2：REST API（可選）
-# CF_API_TOKEN = "your-cloudflare-api-token"
-# CF_ACCOUNT_ID = "your-cloudflare-account-id"
+CF_API_TOKEN = "your-cloudflare-api-token"
+ACCOUNT = "your-cloudflare-account-id"
 ```
 
-### 環境變量
+⚠️ **安全提示**：
+- 不要在 `wrangler.toml` 中直接寫入真實的 Token 和 Account ID
+- 使用 Cloudflare Dashboard 的環境變量功能
+- 或使用 `.dev.vars` 文件（本地開發，不提交到 Git）
 
-| 變量 | 必需 | 說明 |
-|------|------|------|
-| `API_MASTER_KEY` | 是 | API 訪問密鑰 |
-| `CF_API_TOKEN` | 否* | Cloudflare API Token（REST API 模式） |
-| `CF_ACCOUNT_ID` | 否* | Cloudflare Account ID（REST API 模式） |
+### 健康檢查
 
-*僅在不使用 AI Binding 時需要
+訪問 `/health` 端點查看配置狀態：
+
+```bash
+curl https://your-worker.workers.dev/health
+```
+
+響應示例：
+```json
+{
+  "status": "ok",
+  "version": "1.1.0",
+  "mode": "REST API",
+  "model": "@cf/black-forest-labs/flux-2-dev",
+  "account_configured": true,
+  "token_configured": true
+}
+```
 
 ## 📊 API 響應格式
 
@@ -277,7 +368,8 @@ binding = "AI"
   "data": [
     {
       "b64_json": "iVBORw0KGgoAAAANSUhEUgAA...",
-      "prompt": "A serene Japanese garden with cherry blossoms"
+      "prompt": "A serene Japanese garden with cherry blossoms",
+      "revised_prompt": "A serene Japanese garden with cherry blossoms"
     }
   ]
 }
@@ -288,7 +380,7 @@ binding = "AI"
 ```json
 {
   "error": {
-    "message": "Prompt is required",
+    "message": "CF_API_TOKEN environment variable is required",
     "type": "api_error"
   }
 }
@@ -311,28 +403,37 @@ binding = "AI"
 
 ### 性能優化
 
-- **AI Binding**：比 REST API 快 20-30%
+- **REST API**：直接調用 Cloudflare API，穩定可靠
 - **適當尺寸**：根據需求選擇合適尺寸，避免過大
 - **批量處理**：使用異步處理多個請求
+- **緩存結果**：相同參數可緩存結果
 
 ## 🔧 故障排除
 
 ### 常見問題
 
 **Q: 部署失敗提示 "AI binding not found"**  
-A: 確保 `wrangler.toml` 中有 `[[ai]]` 配置，或配置 REST API 參數
+A: 本項目使用 REST API 模式，不需要 AI Binding。確保配置了 `CF_API_TOKEN` 和 `ACCOUNT` 環境變量。
+
+**Q: 錯誤 "Could not route to /client/v4/accounts/..."**  
+A: 檢查：
+- `ACCOUNT` 環境變量是否設置為真實的 Account ID
+- `CF_API_TOKEN` 是否有效
+- API Token 權限是否包含 `Account.Workers AI:Read`
 
 **Q: 圖片生成失敗**  
 A: 檢查：
-- API Key 是否正確
-- 參數是否在有效範圍內
+- 訪問 `/health` 端點查看配置狀態
+- 查看瀏覽器控制台的詳細錯誤信息
+- 確認參數在有效範圍內
 - 參考圖片大小是否合理（建議 < 5MB）
 
 **Q: 生成速度慢**  
 A: 
-- 使用 AI Binding 而非 REST API
-- 減少 steps 參數
+- FLUX.2 模型較大，首次生成需要加載時間
+- 減少 steps 參數（推薦 20-30）
 - 降低圖片分辨率
+- 檢查網絡連接
 
 ## 📚 相關資源
 
@@ -340,6 +441,7 @@ A:
 - [FLUX.2 官方博客](https://blog.cloudflare.com/flux-2-workers-ai/)
 - [Wrangler CLI 文檔](https://developers.cloudflare.com/workers/wrangler/)
 - [FLUX 模型介紹](https://blackforestlabs.ai/)
+- [Cloudflare API 文檔](https://developers.cloudflare.com/api/)
 
 ## 🤝 貢獻
 
@@ -365,6 +467,16 @@ MIT License - 詳見 [LICENSE](LICENSE) 文件
 ## ⭐ Star History
 
 如果這個項目對您有幫助，請給個 Star ⭐️
+
+## 🎉 更新日誌
+
+### v1.1.0 (2024-12-10)
+- ✅ 切換到 REST API 模式
+- ✅ 使用 FLUX.2 [dev] 模型
+- ✅ 支持多圖輸入（最多 4 張）
+- ✅ 添加健康檢查端點
+- ✅ 完善錯誤處理和日誌
+- ✅ 詳細的配置文檔
 
 ---
 
