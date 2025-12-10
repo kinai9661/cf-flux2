@@ -1,7 +1,7 @@
 /**
  * =================================================================================
  * 項目: Cloudflare FLUX.2 Workers AI API
- * 版本: 1.2.0
+ * 版本: 1.2.1
  * 作者: kinai9661
  * 說明: 使用 REST API 調用 Cloudflare Workers AI FLUX.2 [dev] 模型
  *       支持多賬號故障轉移策略，突破單賬號限制
@@ -11,7 +11,7 @@
 
 const CONFIG = {
   PROJECT_NAME: "FLUX.2 Workers AI",
-  VERSION: "1.2.0",
+  VERSION: "1.2.1",
   API_MASTER_KEY: "1",
   CF_FLUX_MODEL: "@cf/black-forest-labs/flux-2-dev",
   DEFAULT_STEPS: 25,
@@ -527,7 +527,7 @@ async function generate() {
     if (params.seed) form.append('seed', params.seed.toString());
     
     uploadedImages.forEach((img, i) => {
-      form.append(\`input_image_\${i}\`, img.file);
+      form.append('input_image_' + i, img.file);
     });
     
     console.log('Sending request...');
@@ -542,7 +542,7 @@ async function generate() {
     if (!res.ok) {
       const text = await res.text();
       console.error('Error response:', text);
-      throw new Error(\`Server error (\${res.status}): \${text}\`);
+      throw new Error('Server error (' + res.status + '): ' + text);
     }
     
     const contentType = res.headers.get('content-type');
@@ -561,15 +561,7 @@ async function generate() {
       const imgSrc = 'data:image/png;base64,' + data.data[0].b64_json;
       const accountUsed = data.account_used || '未知';
       
-      result.innerHTML = \`
-        <div style="background:var(--card);padding:20px;border-radius:10px;border:1px solid var(--border)">
-          <div style="margin-bottom:12px;font-weight:600;color:var(--success)">✅ 生成成功！（使用賬號 ${accountUsed}）</div>
-          <img src="\${imgSrc}" class="result-image">
-          <div style="margin-top:16px">
-            <a href="\${imgSrc}" download="flux2-\${Date.now()}.png" style="color:var(--primary);text-decoration:none;font-weight:600">📥 下載圖片</a>
-          </div>
-        </div>
-      \`;
+      result.innerHTML = '<div style="background:var(--card);padding:20px;border-radius:10px;border:1px solid var(--border)"><div style="margin-bottom:12px;font-weight:600;color:var(--success)">✅ 生成成功！（使用賬號 ' + accountUsed + '）</div><img src="' + imgSrc + '" class="result-image"><div style="margin-top:16px"><a href="' + imgSrc + '" download="flux2-' + Date.now() + '.png" style="color:var(--primary);text-decoration:none;font-weight:600">📥 下載圖片</a></div></div>';
     }
   } catch (e) {
     console.error('Error:', e);
