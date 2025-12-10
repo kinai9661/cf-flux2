@@ -2,21 +2,35 @@ name = "flux2-workers-ai"
 main = "worker.js"
 compatibility_date = "2024-12-10"
 
-# 環境變量配置
+# ===== 環境變量配置 =====
 [vars]
+# API 訪問密鑰（必需）
 API_MASTER_KEY = "your-secret-key-here"
 
-# ===== 方式 1: AI Binding (推薦) =====
-# 使用 Workers AI Binding，無需 API Token
-[ai]
-binding = "AI"
+# Cloudflare API Token（必需）
+# 如何獲取：
+# 1. 登錄 Cloudflare Dashboard
+# 2. 點擊右上角頭像 -> My Profile -> API Tokens
+# 3. 點擊 "Create Token" -> 使用 "Edit Cloudflare Workers" 模板
+# 4. 或者創建自定義 Token，權限需要：Account.Workers AI:Read
+CF_API_TOKEN = "your-cloudflare-api-token"
 
-# ===== 方式 2: REST API =====
-# 如果不使用 AI Binding，需要配置以下變量
-# CF_API_TOKEN = "your-cloudflare-api-token"
+# Cloudflare Account ID（必需）
+# 如何獲取：
+# 1. 登錄 Cloudflare Dashboard
+# 2. 選擇任意網站
+# 3. 在右側欄找到 "Account ID"
+ACCOUNT = "your-cloudflare-account-id"
+
+# 注：也可以使用 CF_ACCOUNT_ID 代替 ACCOUNT
 # CF_ACCOUNT_ID = "your-cloudflare-account-id"
 
-# 部署說明：
-# 1. 修改 API_MASTER_KEY 為您的自定義密鑰
+# ===== 部署說明 =====
+# 1. 修改以上三個環境變量
 # 2. 運行: wrangler deploy
-# 3. 訪問您的 Workers 域名即可使用
+# 3. 訪問您的 Workers 域名
+
+# ===== API 調用格式 =====
+# API Endpoint: https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/ai/run/@cf/black-forest-labs/flux-2-dev
+# Model: @cf/black-forest-labs/flux-2-dev
+# Variable: ACCOUNT or CF_ACCOUNT_ID
