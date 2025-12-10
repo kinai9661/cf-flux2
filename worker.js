@@ -1,7 +1,7 @@
 /**
  * =================================================================================
  * 項目: Cloudflare FLUX.2 Workers AI API
- * 版本: 1.0.0
+ * 版本: 1.0.1
  * 作者: kinai9661
  * 說明: 支持官方 Cloudflare Workers AI FLUX.2 [dev] 模型
  * 博客: https://blog.cloudflare.com/flux-2-workers-ai/
@@ -10,7 +10,7 @@
 
 const CONFIG = {
   PROJECT_NAME: "FLUX.2 Workers AI",
-  VERSION: "1.0.0",
+  VERSION: "1.0.1",
   API_MASTER_KEY: "1",
   CF_FLUX_MODEL: "@cf/black-forest-labs/flux-2-dev",
   IMAGE_MODELS: [
@@ -103,6 +103,12 @@ async function handleImageGeneration(request) {
     else {
       const body = await request.json();
       prompt = body.prompt || body.input;
+      
+      // 如果 prompt 是對象，轉換為 JSON 字符串
+      if (typeof prompt === 'object') {
+        prompt = JSON.stringify(prompt);
+      }
+      
       steps = body.steps || CONFIG.DEFAULT_STEPS;
       width = body.width || CONFIG.DEFAULT_WIDTH;
       height = body.height || CONFIG.DEFAULT_HEIGHT;
@@ -112,8 +118,12 @@ async function handleImageGeneration(request) {
       if (body.images && Array.isArray(body.images)) {
         for (const imgData of body.images.slice(0, CONFIG.MAX_INPUT_IMAGES)) {
           if (imgData.startsWith('data:image')) {
-            const blob = await dataURLtoBlob(imgData);
-            inputImages.push(blob);
+            try {
+              const blob = await dataURLtoBlob(imgData);
+              inputImages.push(blob);
+            } catch (e) {
+              console.error('Failed to process image:', e);
+            }
           }
         }
       }
@@ -133,7 +143,7 @@ async function handleImageGeneration(request) {
     
   } catch (e) {
     console.error('Generation error:', e);
-    return jsonError(e.message, 500);
+    return jsonError(e.message || 'Internal server error', 500);
   }
 }
 
@@ -174,6 +184,7 @@ async function handleWorkersAI(request, prompt, inputImages, params) {
     });
     
   } catch (e) {
+    console.error('Workers AI error:', e);
     throw new Error(`Workers AI error: ${e.message}`);
   }
 }
@@ -183,7 +194,7 @@ async function handleRestAPI(request, prompt, inputImages, params) {
   const { cfToken, cfAccount } = request.ctx;
   
   if (!cfToken || !cfAccount) {
-    return jsonError('CF_API_TOKEN and CF_ACCOUNT_ID required for REST API', 500);
+    return jsonError('CF_API_TOKEN and CF_ACCOUNT_ID required for REST API mode', 500);
   }
   
   try {
@@ -229,6 +240,7 @@ async function handleRestAPI(request, prompt, inputImages, params) {
     });
     
   } catch (e) {
+    console.error('REST API error:', e);
     throw new Error(`REST API error: ${e.message}`);
   }
 }
@@ -315,7 +327,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="card">
 <label class="label">🖼️ 參考圖片（最多4張）</label>
 <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
-<div style="font-size:32px;margin-bottom:8px">📤</div>
+<div style="font-size:32px;margin-bottom:8px">📄</div>
 <div style="font-size:13px;color:var(--text2)">點擊或拖拽上傳圖片</div>
 </div>
 <input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFiles(this.files)">
@@ -325,12 +337,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="card">
 <label class="label">📐 圖片尺寸</label>
 <div class="size-grid">
-<div class="size-btn active" data-size="1024x1024" onclick="setSize(1024,1024)">1024×1024</div>
-<div class="size-btn" data-size="1024x768" onclick="setSize(1024,768)">1024×768</div>
-<div class="size-btn" data-size="768x1024" onclick="setSize(768,1024)">768×1024</div>
-<div class="size-btn" data-size="1280x720" onclick="setSize(1280,720)">1280×720</div>
-<div class="size-btn" data-size="720x1280" onclick="setSize(720,1280)">720×1280</div>
-<div class="size-btn" data-size="1920x1080" onclick="setSize(1920,1080)">1920×1080</div>
+<div class="size-btn active" onclick="setSize(1024,1024)">1024×1024</div>
+<div class="size-btn" onclick="setSize(1024,768)">1024×768</div>
+<div class="size-btn" onclick="setSize(768,1024)">768×1024</div>
+<div class="size-btn" onclick="setSize(1280,720)">1280×720</div>
+<div class="size-btn" onclick="setSize(720,1280)">720×1280</div>
+<div class="size-btn" onclick="setSize(1920,1080)">1920×1080</div>
 </div>
 </div>
 
@@ -460,6 +472,12 @@ async function generate() {
       body: form
     });
     
+    const contentType = res.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
+      const text = await res.text();
+      throw new Error('Server returned non-JSON response. Please check worker logs.');
+    }
+    
     const data = await res.json();
     
     if (data.error) throw new Error(data.error.message);
@@ -480,6 +498,7 @@ async function generate() {
       \`;
     }
   } catch (e) {
+    console.error('Error:', e);
     result.innerHTML = '<div style="padding:20px;background:rgba(239,68,68,.1);border-radius:10px;color:#ef4444">❌ 錯誤：' + e.message + '</div>';
   } finally {
     btn.disabled = false;
