@@ -1,0 +1,22 @@
+name = "flux2-workers-ai"
+main = "worker.js"
+compatibility_date = "2024-12-10"
+
+# 環境變量配置
+[vars]
+API_MASTER_KEY = "your-secret-key-here"
+
+# ===== 方式 1: AI Binding (推薦) =====
+# 使用 Workers AI Binding，無需 API Token
+[[ai]]
+binding = "AI"
+
+# ===== 方式 2: REST API =====
+# 如果不使用 AI Binding，需要配置以下變量
+# CF_API_TOKEN = "your-cloudflare-api-token"
+# CF_ACCOUNT_ID = "your-cloudflare-account-id"
+
+# 部署說明：
+# 1. 修改 API_MASTER_KEY 為您的自定義密鑰
+# 2. 運行: wrangler deploy
+# 3. 訪問您的 Workers 域名即可使用
