@@ -8,7 +8,7 @@ API_MASTER_KEY = "your-secret-key-here"
 
 # ===== 方式 1: AI Binding (推薦) =====
 # 使用 Workers AI Binding，無需 API Token
-[[ai]]
+[ai]
 binding = "AI"
 
 # ===== 方式 2: REST API =====
