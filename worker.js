@@ -1,7 +1,7 @@
 /**
  * =================================================================================
  * 項目: Cloudflare FLUX.2 Workers AI API
- * 版本: 1.1.0
+ * 版本: 1.1.1
  * 作者: kinai9661
  * 說明: 使用 REST API 調用 Cloudflare Workers AI FLUX.2 [dev] 模型
  * 博客: https://blog.cloudflare.com/flux-2-workers-ai/
@@ -10,7 +10,7 @@
 
 const CONFIG = {
   PROJECT_NAME: "FLUX.2 Workers AI",
-  VERSION: "1.1.0",
+  VERSION: "1.1.1",
   API_MASTER_KEY: "1",
   CF_FLUX_MODEL: "@cf/black-forest-labs/flux-2-dev",
   DEFAULT_STEPS: 25,
@@ -344,6 +344,7 @@ ${!isConfigured ? '<div class="info-box" style="background:rgba(239,68,68,.1);bo
 <div class="card">
 <label class="label">📐 圖片尺寸</label>
 <div class="size-grid">
+<div class="size-btn" onclick="setSize(512,512)">512×512</div>
 <div class="size-btn active" onclick="setSize(1024,1024)">1024×1024</div>
 <div class="size-btn" onclick="setSize(1024,768)">1024×768</div>
 <div class="size-btn" onclick="setSize(768,1024)">768×1024</div>
