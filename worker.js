@@ -1,22 +1,19 @@
 /**
  * =================================================================================
  * 項目: Cloudflare FLUX.2 Workers AI API
- * 版本: 1.0.2
+ * 版本: 1.1.0
  * 作者: kinai9661
- * 說明: 支持官方 Cloudflare Workers AI FLUX.2 [dev] 模型
+ * 說明: 使用 REST API 調用 Cloudflare Workers AI FLUX.2 [dev] 模型
  * 博客: https://blog.cloudflare.com/flux-2-workers-ai/
  * =================================================================================
  */
 
 const CONFIG = {
   PROJECT_NAME: "FLUX.2 Workers AI",
-  VERSION: "1.0.2",
+  VERSION: "1.1.0",
   API_MASTER_KEY: "1",
-  CF_FLUX_MODEL: "@cf/black-forest-labs/flux-1-schnell",
-  IMAGE_MODELS: [
-    "@cf/black-forest-labs/flux-1-schnell"
-  ],
-  DEFAULT_STEPS: 4,
+  CF_FLUX_MODEL: "@cf/black-forest-labs/flux-2-dev",
+  DEFAULT_STEPS: 25,
   DEFAULT_WIDTH: 1024,
   DEFAULT_HEIGHT: 1024,
   MAX_INPUT_IMAGES: 4
@@ -27,7 +24,7 @@ export default {
     try {
       const apiKey = env.API_MASTER_KEY || CONFIG.API_MASTER_KEY;
       const cfToken = env.CF_API_TOKEN;
-      const cfAccount = env.CF_ACCOUNT_ID;
+      const cfAccount = env.CF_ACCOUNT_ID || env.ACCOUNT;
       
       request.ctx = { apiKey, cfToken, cfAccount, env };
       const url = new URL(request.url);
@@ -44,8 +41,10 @@ export default {
         return new Response(JSON.stringify({
           status: 'ok',
           version: CONFIG.VERSION,
-          ai_binding: !!env.AI,
-          model: CONFIG.CF_FLUX_MODEL
+          mode: cfToken && cfAccount ? 'REST API' : 'Not Configured',
+          model: CONFIG.CF_FLUX_MODEL,
+          account_configured: !!cfAccount,
+          token_configured: !!cfToken
         }), {
           headers: corsHeaders({ 'Content-Type': 'application/json' })
         });
@@ -76,13 +75,15 @@ async function handleApi(request) {
     const path = url.pathname;
     
     if (path === '/v1/models') {
-      const models = CONFIG.IMAGE_MODELS.map(id => ({
-        id,
-        object: 'model',
-        created: Date.now(),
-        owned_by: 'cloudflare'
-      }));
-      return new Response(JSON.stringify({ object: 'list', data: models }), {
+      return new Response(JSON.stringify({
+        object: 'list',
+        data: [{
+          id: CONFIG.CF_FLUX_MODEL,
+          object: 'model',
+          created: Date.now(),
+          owned_by: 'cloudflare'
+        }]
+      }), {
         headers: corsHeaders({ 'Content-Type': 'application/json' })
       });
     }
@@ -100,22 +101,43 @@ async function handleApi(request) {
 
 async function handleImageGeneration(request) {
   try {
-    const contentType = request.headers.get('content-type') || '';
-    let prompt, steps, width, height;
+    const { cfToken, cfAccount } = request.ctx;
     
-    // 處理 multipart/form-data
+    // 檢查必需的環境變量
+    if (!cfToken) {
+      return jsonError('CF_API_TOKEN environment variable is required', 500);
+    }
+    
+    if (!cfAccount) {
+      return jsonError('CF_ACCOUNT_ID or ACCOUNT environment variable is required', 500);
+    }
+    
+    const contentType = request.headers.get('content-type') || '';
+    let prompt, inputImages = [], steps, width, height, seed;
+    
+    // 處理 multipart/form-data（支持圖片上傳）
     if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
       prompt = formData.get('prompt');
       steps = parseInt(formData.get('steps')) || CONFIG.DEFAULT_STEPS;
       width = parseInt(formData.get('width')) || CONFIG.DEFAULT_WIDTH;
       height = parseInt(formData.get('height')) || CONFIG.DEFAULT_HEIGHT;
+      seed = formData.get('seed') ? parseInt(formData.get('seed')) : undefined;
+      
+      // 收集上傳的圖片
+      for (let i = 0; i < CONFIG.MAX_INPUT_IMAGES; i++) {
+        const img = formData.get(`input_image_${i}`);
+        if (img && img instanceof Blob) {
+          inputImages.push(img);
+        }
+      }
     } 
-    // 處理 JSON
+    // 處理 JSON（標準格式）
     else {
       const body = await request.json();
       prompt = body.prompt || body.input;
       
+      // 如果 prompt 是對象，轉換為 JSON 字符串
       if (typeof prompt === 'object') {
         prompt = JSON.stringify(prompt);
       }
@@ -123,38 +145,93 @@ async function handleImageGeneration(request) {
       steps = body.steps || CONFIG.DEFAULT_STEPS;
       width = body.width || CONFIG.DEFAULT_WIDTH;
       height = body.height || CONFIG.DEFAULT_HEIGHT;
+      seed = body.seed;
+      
+      // 處理 base64 圖片
+      if (body.images && Array.isArray(body.images)) {
+        for (const imgData of body.images.slice(0, CONFIG.MAX_INPUT_IMAGES)) {
+          if (imgData.startsWith('data:image')) {
+            try {
+              const res = await fetch(imgData);
+              const blob = await res.blob();
+              inputImages.push(blob);
+            } catch (e) {
+              console.error('Failed to process image:', e);
+            }
+          }
+        }
+      }
     }
     
     if (!prompt) {
       return jsonError('Prompt is required', 400);
     }
     
-    console.log('Generation request:', { prompt: prompt.substring(0, 100), steps, width, height });
-    
-    // 檢查 AI binding
-    if (!request.ctx.env || !request.ctx.env.AI) {
-      console.error('AI binding not found');
-      return jsonError('AI binding not configured. Please check wrangler.toml', 500);
-    }
-    
-    // 調用 Workers AI
-    console.log('Calling Workers AI...');
-    const result = await request.ctx.env.AI.run(CONFIG.CF_FLUX_MODEL, {
-      prompt: prompt,
-      num_steps: steps
+    console.log('Generation request:', {
+      prompt: prompt.substring(0, 100),
+      steps,
+      width,
+      height,
+      seed,
+      inputImagesCount: inputImages.length
     });
     
-    console.log('Workers AI response received');
+    // 構建 API URL
+    const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${cfAccount}/ai/run/${CONFIG.CF_FLUX_MODEL}`;
+    console.log('API URL:', apiUrl);
     
-    // 返回結果
+    // 構建請求 FormData
+    const form = new FormData();
+    form.append('prompt', prompt);
+    form.append('steps', steps.toString());
+    form.append('width', width.toString());
+    form.append('height', height.toString());
+    if (seed) form.append('seed', seed.toString());
+    
+    // 添加參考圖片
+    inputImages.forEach((img, i) => {
+      form.append(`input_image_${i}`, img);
+    });
+    
+    // 調用 Cloudflare API
+    console.log('Calling Cloudflare API...');
+    const res = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${cfToken}`
+      },
+      body: form
+    });
+    
+    console.log('API response status:', res.status);
+    
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error('API error response:', errorText);
+      throw new Error(`Cloudflare API error (${res.status}): ${errorText}`);
+    }
+    
+    const result = await res.json();
+    console.log('API response received successfully');
+    
+    // 提取圖片數據
+    const imageData = result.result?.image || result.image || result.result;
+    
+    if (!imageData) {
+      console.error('No image data in response:', result);
+      throw new Error('No image data in API response');
+    }
+    
+    // 返回標準格式響應
     return new Response(JSON.stringify({
       id: crypto.randomUUID(),
       object: 'image.generation',
       created: Math.floor(Date.now() / 1000),
       model: CONFIG.CF_FLUX_MODEL,
       data: [{
-        b64_json: arrayBufferToBase64(result),
-        prompt: prompt
+        b64_json: imageData,
+        prompt: prompt,
+        revised_prompt: prompt
       }]
     }), {
       headers: corsHeaders({ 'Content-Type': 'application/json' })
@@ -170,7 +247,8 @@ async function handleImageGeneration(request) {
 function handleUI(request) {
   const origin = new URL(request.url).origin;
   const key = request.ctx.apiKey;
-  const hasAI = request.ctx.env && request.ctx.env.AI;
+  const { cfToken, cfAccount } = request.ctx;
+  const isConfigured = !!(cfToken && cfAccount);
   
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -203,6 +281,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .btn-primary{background:linear-gradient(135deg,var(--primary),#764ba2);color:#fff;width:100%}
 .btn-primary:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 8px 24px rgba(102,126,234,.4)}
 .btn-primary:disabled{opacity:.6;cursor:not-allowed;transform:none}
+.upload-zone{border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;transition:all .3s;background:var(--surface)}
+.upload-zone:hover{border-color:var(--primary);background:rgba(102,126,234,.05)}
+.upload-zone.dragover{border-color:var(--primary);background:rgba(102,126,234,.1)}
+.preview-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:12px}
+.preview-item{position:relative;border-radius:8px;overflow:hidden;border:2px solid var(--border)}
+.preview-item img{width:100%;height:120px;object-fit:cover}
+.preview-remove{position:absolute;top:6px;right:6px;width:24px;height:24px;border-radius:50%;background:rgba(0,0,0,.8);color:#fff;border:none;cursor:pointer;font-size:14px}
 .result-image{width:100%;border-radius:10px;margin-top:16px;border:1px solid var(--border)}
 .info-box{background:rgba(102,126,234,.1);padding:16px;border-radius:10px;border-left:4px solid var(--primary);font-size:13px;line-height:1.6;margin-bottom:16px}
 .slider-group{margin-top:12px}
@@ -225,37 +310,68 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="header">
 <div class="title">🎨 ${CONFIG.PROJECT_NAME}</div>
 <div class="subtitle">Powered by Cloudflare Workers AI • Model: ${CONFIG.CF_FLUX_MODEL}</div>
-<div class="status ${hasAI ? 'ok' : 'error'}">AI Binding: ${hasAI ? '✅ Connected' : '❌ Not Found'}</div>
+<div class="status ${isConfigured ? 'ok' : 'error'}">配置狀態: ${isConfigured ? '✅ 已配置' : '❌ 未配置 API Token'}</div>
 </div>
 
 <div class="container">
 <aside class="sidebar">
-${hasAI ? '' : '<div class="info-box" style="background:rgba(239,68,68,.1);border-left-color:#ef4444"><strong>⚠️ AI Binding 未配置</strong><br>請檢查 wrangler.toml 配置</div>'}
+${!isConfigured ? '<div class="info-box" style="background:rgba(239,68,68,.1);border-left-color:#ef4444"><strong>⚠️ 環境變量未配置</strong><br>請在 wrangler.toml 中配置:<br>• CF_API_TOKEN<br>• CF_ACCOUNT_ID 或 ACCOUNT</div>' : ''}
 
 <div class="info-box">
-<strong>✨ FLUX.1 Schnell</strong><br>
-• 極速生成（4步）<br>
-• 高質量輸出<br>
-• 1024×1024 分辨率
+<strong>✨ FLUX.2 [dev] 特性</strong><br>
+• 多參考圖（最多4張）<br>
+• 角色一致性保持<br>
+• JSON 高級提示詞<br>
+• 最大 4MP 輸出<br>
+• REST API 調用
 </div>
 
 <div class="card">
 <label class="label">📝 提示詞</label>
-<textarea class="textarea" id="prompt" placeholder="描述您想要的圖像...\n\n示例：A serene Japanese garden with cherry blossoms and a koi pond">A beautiful sunset over mountains</textarea>
+<textarea class="textarea" id="prompt" placeholder="描述您想要的圖像...\n\n示例：A serene Japanese garden with cherry blossoms">A beautiful sunset over mountains</textarea>
+</div>
+
+<div class="card">
+<label class="label">🖼️ 參考圖片（最多4張）</label>
+<div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+<div style="font-size:32px;margin-bottom:8px">📤</div>
+<div style="font-size:13px;color:var(--text2)">點擊或拖拽上傳圖片</div>
+</div>
+<input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFiles(this.files)">
+<div class="preview-grid" id="preview-grid"></div>
+</div>
+
+<div class="card">
+<label class="label">📐 圖片尺寸</label>
+<div class="size-grid">
+<div class="size-btn active" onclick="setSize(1024,1024)">1024×1024</div>
+<div class="size-btn" onclick="setSize(1024,768)">1024×768</div>
+<div class="size-btn" onclick="setSize(768,1024)">768×1024</div>
+<div class="size-btn" onclick="setSize(1280,720)">1280×720</div>
+<div class="size-btn" onclick="setSize(1536,1024)">1536×1024</div>
+<div class="size-btn" onclick="setSize(1920,1080)">1920×1080</div>
+</div>
 </div>
 
 <div class="card">
 <label class="label">⚙️ 生成參數</label>
 <div class="slider-group">
 <div class="slider-label">
-<span>Steps（推薦 4）</span>
-<span id="steps-value">${CONFIG.DEFAULT_STEPS}</span>
+<span>Steps（推薦 25）</span>
+<span id="steps-value">25</span>
 </div>
-<input type="range" class="slider" id="steps-slider" min="1" max="8" value="${CONFIG.DEFAULT_STEPS}" oninput="updateValue('steps',this.value)">
+<input type="range" class="slider" id="steps-slider" min="10" max="50" value="25" oninput="updateValue('steps',this.value)">
+</div>
+<div class="slider-group">
+<div class="slider-label">
+<span>Seed（可選）</span>
+<span id="seed-value">隨機</span>
+</div>
+<input type="number" class="input" id="seed-input" placeholder="留空為隨機" style="margin-top:8px;width:100%;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text)" oninput="updateSeed(this.value)">
 </div>
 </div>
 
-<button class="btn btn-primary" id="gen-btn" onclick="generate()" ${hasAI ? '' : 'disabled'}>✨ 生成圖像</button>
+<button class="btn btn-primary" id="gen-btn" onclick="generate()" ${isConfigured ? '' : 'disabled'}>✨ 生成圖像</button>
 
 <div class="card" style="margin-top:16px">
 <label class="label">📡 API 接口</label>
@@ -275,11 +391,61 @@ Authorization: Bearer ${key}
 <script>
 const API = '${origin}/v1/images/generations';
 const KEY = '${key}';
-let params = { steps: ${CONFIG.DEFAULT_STEPS} };
+let uploadedImages = [];
+let params = { width: 1024, height: 1024, steps: 25, seed: null };
+
+const uploadZone = document.getElementById('upload-zone');
+['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+  uploadZone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); });
+});
+['dragenter', 'dragover'].forEach(evt => {
+  uploadZone.addEventListener(evt, () => uploadZone.classList.add('dragover'));
+});
+['dragleave', 'drop'].forEach(evt => {
+  uploadZone.addEventListener(evt, () => uploadZone.classList.remove('dragover'));
+});
+uploadZone.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
+
+function handleFiles(files) {
+  Array.from(files).slice(0, ${CONFIG.MAX_INPUT_IMAGES} - uploadedImages.length).forEach(file => {
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = e => {
+        uploadedImages.push({ file, dataURL: e.target.result });
+        renderPreviews();
+      };
+      reader.readAsDataURL(file);
+    }
+  });
+}
+
+function renderPreviews() {
+  const grid = document.getElementById('preview-grid');
+  grid.innerHTML = uploadedImages.map((img, i) => 
+    '<div class="preview-item"><img src="' + img.dataURL + '"><button class="preview-remove" onclick="removeImage(' + i + ')">×</button></div>'
+  ).join('');
+}
+
+function removeImage(index) {
+  uploadedImages.splice(index, 1);
+  renderPreviews();
+}
+
+function setSize(w, h) {
+  document.querySelectorAll('.size-btn').forEach(btn => btn.classList.remove('active'));
+  event.target.classList.add('active');
+  params.width = w;
+  params.height = h;
+}
 
 function updateValue(key, value) {
   params[key] = parseInt(value);
   document.getElementById(key + '-value').textContent = value;
+}
+
+function updateSeed(value) {
+  params.seed = value ? parseInt(value) : null;
+  document.getElementById('seed-value').textContent = value || '隨機';
 }
 
 async function generate() {
@@ -296,17 +462,22 @@ async function generate() {
   result.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">正在生成圖像，請稍候...</div>';
   
   try {
+    const form = new FormData();
+    form.append('prompt', prompt);
+    form.append('steps', params.steps.toString());
+    form.append('width', params.width.toString());
+    form.append('height', params.height.toString());
+    if (params.seed) form.append('seed', params.seed.toString());
+    
+    uploadedImages.forEach((img, i) => {
+      form.append(\`input_image_\${i}\`, img.file);
+    });
+    
     console.log('Sending request...');
     const res = await fetch(API, {
       method: 'POST',
-      headers: { 
-        'Authorization': 'Bearer ' + KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        prompt: prompt,
-        steps: params.steps
-      })
+      headers: { 'Authorization': 'Bearer ' + KEY },
+      body: form
     });
     
     console.log('Response status:', res.status);
@@ -314,7 +485,7 @@ async function generate() {
     if (!res.ok) {
       const text = await res.text();
       console.error('Error response:', text);
-      throw new Error(`Server error (${res.status}): ${text}`);
+      throw new Error(\`Server error (\${res.status}): \${text}\`);
     }
     
     const contentType = res.headers.get('content-type');
@@ -325,7 +496,7 @@ async function generate() {
     }
     
     const data = await res.json();
-    console.log('Response data:', data);
+    console.log('Response data received');
     
     if (data.error) throw new Error(data.error.message);
     
@@ -337,7 +508,7 @@ async function generate() {
           <div style="margin-bottom:12px;font-weight:600;color:var(--success)">✅ 生成成功！</div>
           <img src="\${imgSrc}" class="result-image">
           <div style="margin-top:16px">
-            <a href="\${imgSrc}" download="flux-\${Date.now()}.png" style="color:var(--primary);text-decoration:none;font-weight:600">📥 下載圖片</a>
+            <a href="\${imgSrc}" download="flux2-\${Date.now()}.png" style="color:var(--primary);text-decoration:none;font-weight:600">📥 下載圖片</a>
           </div>
         </div>
       \`;
@@ -357,16 +528,6 @@ async function generate() {
   return new Response(html, {
     headers: { 'Content-Type': 'text/html; charset=utf-8' }
   });
-}
-
-function arrayBufferToBase64(buffer) {
-  if (typeof buffer === 'string') return buffer;
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
 }
 
 function jsonError(msg, status) {
