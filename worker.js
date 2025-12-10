@@ -1,25 +1,60 @@
 /**
  * =================================================================================
  * 項目: Cloudflare FLUX.2 Workers AI API
- * 版本: 1.2.1
+ * 版本: 1.3.0
  * 作者: kinai9661
  * 說明: 使用 REST API 調用 Cloudflare Workers AI FLUX.2 [dev] 模型
- *       支持多賬號故障轉移策略，突破單賬號限制
+ *       支持多賬號故障轉移策略 + 智能提示詞處理
  * 博客: https://blog.cloudflare.com/flux-2-workers-ai/
  * =================================================================================
  */
 
 const CONFIG = {
   PROJECT_NAME: "FLUX.2 Workers AI",
-  VERSION: "1.2.1",
+  VERSION: "1.3.0",
   API_MASTER_KEY: "1",
   CF_FLUX_MODEL: "@cf/black-forest-labs/flux-2-dev",
   DEFAULT_STEPS: 25,
   DEFAULT_WIDTH: 1024,
   DEFAULT_HEIGHT: 1024,
   MAX_INPUT_IMAGES: 4,
-  MAX_ACCOUNTS: 10 // 最大支持 10 個賬號
+  MAX_ACCOUNTS: 10
 };
+
+// 敏感內容檢測模式
+const SENSITIVE_PATTERNS = [
+  // 名人/公眾人物
+  { pattern: /taylor swift|beyonce|lady gaga|rihanna|ariana grande/i, replacement: 'a famous female singer' },
+  { pattern: /elon musk|bill gates|steve jobs|jeff bezos|mark zuckerberg/i, replacement: 'a tech entrepreneur' },
+  { pattern: /trump|biden|obama|putin|xi jinping/i, replacement: 'a political leader' },
+  { pattern: /leonardo dicaprio|brad pitt|tom cruise|will smith/i, replacement: 'a male actor' },
+  
+  // 受版權保護的角色
+  { pattern: /spider[- ]?man|spiderman/i, replacement: 'a web-slinging superhero' },
+  { pattern: /batman|bruce wayne/i, replacement: 'a dark vigilante hero' },
+  { pattern: /superman|clark kent/i, replacement: 'a flying superhero' },
+  { pattern: /iron man|tony stark/i, replacement: 'a tech-armored hero' },
+  { pattern: /captain america|steve rogers/i, replacement: 'a shield-wielding hero' },
+  { pattern: /mickey mouse|minnie mouse/i, replacement: 'a cartoon mouse character' },
+  { pattern: /hello kitty/i, replacement: 'a cute cat character' },
+  { pattern: /pikachu|pokemon/i, replacement: 'an electric creature' },
+  { pattern: /harry potter/i, replacement: 'a young wizard' },
+  { pattern: /darth vader|luke skywalker/i, replacement: 'a space warrior' },
+  
+  // 知名藝術作品
+  { pattern: /mona lisa/i, replacement: 'a Renaissance portrait' },
+  { pattern: /starry night/i, replacement: 'a swirling night sky painting' },
+  { pattern: /the scream/i, replacement: 'an expressionist artwork' },
+  { pattern: /girl with (a )?pearl earring/i, replacement: 'a Dutch Golden Age portrait' },
+  
+  // 品牌商標
+  { pattern: /coca[- ]?cola|coke logo/i, replacement: 'a soda brand' },
+  { pattern: /pepsi/i, replacement: 'a beverage brand' },
+  { pattern: /nike swoosh|nike logo/i, replacement: 'a sportswear brand' },
+  { pattern: /adidas/i, replacement: 'an athletic brand' },
+  { pattern: /apple logo/i, replacement: 'a tech company logo' },
+  { pattern: /mcdonalds|mcdonald's/i, replacement: 'a fast food restaurant' }
+];
 
 export default {
   async fetch(request, env, ctx) {
@@ -42,7 +77,7 @@ export default {
         return new Response(JSON.stringify({
           status: 'ok',
           version: CONFIG.VERSION,
-          mode: 'Multi-Account Fallback Strategy',
+          mode: 'Multi-Account Fallback + Smart Prompt Processing',
           model: CONFIG.CF_FLUX_MODEL,
           total_accounts: accounts.length,
           accounts_configured: accounts.map(a => `Account ${a.index}`)
@@ -63,24 +98,34 @@ export default {
   }
 };
 
-// 獲取所有可用的賬號配置
 function getAvailableAccounts(env) {
   const accounts = [];
-  
   for (let i = 1; i <= CONFIG.MAX_ACCOUNTS; i++) {
     const token = env[`CF_API_TOKEN_${i}`];
     const accountId = env[`ACCOUNT_${i}`];
-    
     if (token && accountId) {
-      accounts.push({
-        index: i,
-        token: token,
-        accountId: accountId
-      });
+      accounts.push({ index: i, token: token, accountId: accountId });
+    }
+  }
+  return accounts;
+}
+
+// 智能提示詞清理
+function sanitizePrompt(prompt) {
+  let sanitized = prompt;
+  let modifications = [];
+  
+  for (const { pattern, replacement } of SENSITIVE_PATTERNS) {
+    if (pattern.test(sanitized)) {
+      const before = sanitized;
+      sanitized = sanitized.replace(pattern, replacement);
+      if (before !== sanitized) {
+        modifications.push({ pattern: pattern.source, replacement });
+      }
     }
   }
   
-  return accounts;
+  return { sanitized, modifications, isModified: modifications.length > 0 };
 }
 
 async function handleApi(request) {
@@ -131,7 +176,6 @@ async function handleImageGeneration(request) {
     const contentType = request.headers.get('content-type') || '';
     let prompt, inputImages = [], steps, width, height, seed;
     
-    // 處理 multipart/form-data
     if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
       prompt = formData.get('prompt');
@@ -146,9 +190,7 @@ async function handleImageGeneration(request) {
           inputImages.push(img);
         }
       }
-    } 
-    // 處理 JSON
-    else {
+    } else {
       const body = await request.json();
       prompt = body.prompt || body.input;
       
@@ -180,16 +222,26 @@ async function handleImageGeneration(request) {
       return jsonError('Prompt is required', 400);
     }
     
+    // 智能提示詞清理
+    const { sanitized, modifications, isModified } = sanitizePrompt(prompt);
+    const finalPrompt = sanitized;
+    
     console.log('Generation request:', {
-      prompt: prompt.substring(0, 100),
+      originalPrompt: prompt.substring(0, 100),
+      sanitizedPrompt: isModified ? finalPrompt.substring(0, 100) : 'no changes',
+      modifications: modifications.length,
       steps, width, height, seed,
       inputImagesCount: inputImages.length,
       availableAccounts: accounts.length
     });
     
-    // 使用故障轉移策略生成圖像
     const result = await generateWithFallback(accounts, {
-      prompt, inputImages, steps, width, height, seed
+      prompt: finalPrompt,
+      inputImages,
+      steps,
+      width,
+      height,
+      seed
     });
     
     return new Response(JSON.stringify({
@@ -198,10 +250,12 @@ async function handleImageGeneration(request) {
       created: Math.floor(Date.now() / 1000),
       model: CONFIG.CF_FLUX_MODEL,
       account_used: result.accountUsed,
+      prompt_modified: isModified,
+      original_prompt: isModified ? prompt : undefined,
       data: [{
         b64_json: result.imageData,
-        prompt: prompt,
-        revised_prompt: prompt
+        prompt: finalPrompt,
+        revised_prompt: finalPrompt
       }]
     }), {
       headers: corsHeaders({ 'Content-Type': 'application/json' })
@@ -209,11 +263,24 @@ async function handleImageGeneration(request) {
     
   } catch (e) {
     console.error('Generation error:', e);
+    
+    // 識別版權審核錯誤
+    if (e.message.includes('flagged') || e.message.includes('copyright') || e.message.includes('personas')) {
+      return jsonError(
+        '提示詞被內容審核攻擊。請避免使用：\n' +
+        '1. 名人/公眾人物名字\n' +
+        '2. 受版權保護的角色\n' +
+        '3. 品牌商標\n' +
+        '4. 知名藝術作品\n' +
+        '建議使用通用描述，例如："a person", "a superhero", "a landscape"',
+        400
+      );
+    }
+    
     return jsonError(`Generation failed: ${e.message}`, 500);
   }
 }
 
-// 故障轉移策略：嘗試所有賬號直到成功
 async function generateWithFallback(accounts, params) {
   let lastError = null;
   let attemptedAccounts = [];
@@ -226,16 +293,12 @@ async function generateWithFallback(accounts, params) {
       const result = await callCloudflareAPI(account, params);
       
       console.log(`✅ Success with Account ${account.index}`);
-      return {
-        imageData: result,
-        accountUsed: account.index
-      };
+      return { imageData: result, accountUsed: account.index };
       
     } catch (error) {
       console.error(`❌ Account ${account.index} failed: ${error.message}`);
       lastError = error;
       
-      // 檢查是否為速率限制或配額錯誤
       const errorMsg = error.message.toLowerCase();
       const isRateLimit = errorMsg.includes('429') || 
                           errorMsg.includes('quota') || 
@@ -244,15 +307,13 @@ async function generateWithFallback(accounts, params) {
       
       if (isRateLimit) {
         console.log(`🔄 Account ${account.index} rate limited, trying next account...`);
-        continue; // 嘗試下一個賬號
+        continue;
       }
       
-      // 其他錯誤（非配額問題），直接拋出
       throw error;
     }
   }
   
-  // 所有賬號都失敗
   throw new Error(
     `All ${accounts.length} accounts exhausted. ` +
     `Attempted accounts: [${attemptedAccounts.join(', ')}]. ` +
@@ -260,7 +321,6 @@ async function generateWithFallback(accounts, params) {
   );
 }
 
-// 調用 Cloudflare API
 async function callCloudflareAPI(account, params) {
   const { prompt, inputImages, steps, width, height, seed } = params;
   
@@ -279,9 +339,7 @@ async function callCloudflareAPI(account, params) {
   
   const res = await fetch(apiUrl, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${account.token}`
-    },
+    headers: { 'Authorization': `Bearer ${account.token}` },
     body: form
   });
   
@@ -315,7 +373,7 @@ function handleUI(request) {
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
---primary:#667eea;--secondary:#f5576c;--success:#10b981;
+--primary:#667eea;--secondary:#f5576c;--success:#10b981;--warning:#f59e0b;
 --bg:#0f172a;--surface:#1e293b;--card:#334155;
 --text:#f1f5f9;--text2:#94a3b8;--border:rgba(255,255,255,.1);
 }
@@ -333,6 +391,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .label{display:block;font-size:12px;font-weight:700;margin-bottom:8px;color:var(--text2);text-transform:uppercase}
 .textarea{width:100%;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font:inherit;transition:all .3s;min-height:100px;resize:vertical;font-size:14px;line-height:1.6}
 .textarea:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(102,126,234,.1)}
+.textarea.warning{border-color:var(--warning)}
 .btn{padding:14px 24px;border:none;border-radius:10px;font-weight:700;cursor:pointer;transition:all .3s;font-size:14px}
 .btn-primary{background:linear-gradient(135deg,var(--primary),#764ba2);color:#fff;width:100%}
 .btn-primary:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 8px 24px rgba(102,126,234,.4)}
@@ -345,7 +404,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .preview-item img{width:100%;height:120px;object-fit:cover}
 .preview-remove{position:absolute;top:6px;right:6px;width:24px;height:24px;border-radius:50%;background:rgba(0,0,0,.8);color:#fff;border:none;cursor:pointer;font-size:14px}
 .result-image{width:100%;border-radius:10px;margin-top:16px;border:1px solid var(--border)}
-.info-box{background:rgba(102,126,234,.1);padding:16px;border-radius:10px;border-left:4px solid var(--primary);font-size:13px;line-height:1.6;margin-bottom:16px}
+.info-box{padding:16px;border-radius:10px;font-size:13px;line-height:1.6;margin-bottom:16px}
+.info-box.primary{background:rgba(102,126,234,.1);border-left:4px solid var(--primary)}
+.info-box.success{background:rgba(16,185,129,.1);border-left:4px solid var(--success)}
+.info-box.warning{background:rgba(245,158,11,.1);border-left:4px solid var(--warning)}
+.info-box.error{background:rgba(239,68,68,.1);border-left:4px solid var(--secondary)}
 .slider-group{margin-top:12px}
 .slider-label{display:flex;justify-content:space-between;margin-bottom:8px;font-size:13px}
 .slider{width:100%;height:6px;border-radius:3px;background:var(--surface);outline:none;-webkit-appearance:none}
@@ -356,6 +419,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .size-btn.active{background:var(--primary);color:#fff;border-color:var(--primary)}
 .loading{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+.safe-prompts{margin-top:12px;padding:12px;background:var(--surface);border-radius:8px;font-size:12px}
+.safe-prompts h4{margin-bottom:8px;color:var(--success)}
+.safe-prompts ul{margin-left:16px;color:var(--text2)}
+.safe-prompts li{margin-bottom:4px}
+#prompt-warning{display:none;margin-top:8px;padding:10px;background:rgba(245,158,11,.1);border:1px solid var(--warning);border-radius:6px;font-size:12px;color:var(--warning)}
 @media(max-width:1024px){
 .container{grid-template-columns:1fr;gap:20px}
 .sidebar{position:static}
@@ -365,26 +433,36 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <body>
 <div class="header">
 <div class="title">🎨 ${CONFIG.PROJECT_NAME}</div>
-<div class="subtitle">Powered by Cloudflare Workers AI • Model: ${CONFIG.CF_FLUX_MODEL}</div>
+<div class="subtitle">Powered by Cloudflare Workers AI • 智能提示詞處理 v${CONFIG.VERSION}</div>
 <div class="status ${isConfigured ? 'ok' : 'error'}">${isConfigured ? `✅ ${accounts.length} 個賬號已配置` : '❌ 未配置賬號'}</div>
 </div>
 
 <div class="container">
 <aside class="sidebar">
-${!isConfigured ? '<div class="info-box" style="background:rgba(239,68,68,.1);border-left-color:#ef4444"><strong>⚠️ 環境變量未配置</strong><br>請配置至少一組：<br>• CF_API_TOKEN_1<br>• ACCOUNT_1<br><br>可配置多組以突破限制！</div>' : `<div class="info-box" style="background:rgba(16,185,129,.1);border-left-color:#10b981"><strong>🔄 故障轉移模式</strong><br>已配置 ${accounts.length} 個賬號<br>當某個賬號達到限制時<br>會自動切換到下一個！</div>`}
+${!isConfigured ? '<div class="info-box error"><strong>⚠️ 環境變量未配置</strong><br>請配置至少一組：<br>• CF_API_TOKEN_1<br>• ACCOUNT_1</div>' : `<div class="info-box success"><strong>🔄 智能模式</strong><br>• ${accounts.length} 個賬號故障轉移<br>• 自動提示詞清理<br>• 內容審核智能處理</div>`}
 
-<div class="info-box">
-<strong>✨ FLUX.2 [dev] 特性</strong><br>
-• 多參考圖（最多4張）<br>
-• 角色一致性保持<br>
-• JSON 高級提示詞<br>
-• 最大 4MP 輸出<br>
-• 智能故障轉移
+<div class="info-box warning">
+<strong>🚨 內容審核說明</strong><br>
+Cloudflare 會審核提示詞，請避免：<br>
+• 名人/公眾人物<br>
+• 受版權保護的角色<br>
+• 品牌商標<br>
+系統會自動清理敏感內容！
 </div>
 
 <div class="card">
 <label class="label">📝 提示詞</label>
-<textarea class="textarea" id="prompt" placeholder="描述您想要的圖像...\n\n示例：A serene Japanese garden with cherry blossoms">A beautiful sunset over mountains</textarea>
+<textarea class="textarea" id="prompt" placeholder="描述您想要的圖像...\n\n建議使用通用描述，避免名人、品牌等敏感內容">A serene mountain landscape at sunset with pine trees</textarea>
+<div id="prompt-warning"></div>
+<div class="safe-prompts">
+<h4>✅ 安全提示詞示例</h4>
+<ul>
+<li>A futuristic cityscape with flying cars</li>
+<li>Portrait of a young woman in Renaissance style</li>
+<li>A cozy coffee shop with warm lighting</li>
+<li>Cyberpunk street scene with neon signs</li>
+</ul>
+</div>
 </div>
 
 <div class="card">
@@ -451,6 +529,38 @@ const KEY = '${key}';
 let uploadedImages = [];
 let params = { width: 1024, height: 1024, steps: 25, seed: null };
 
+// 敏感內容檢測模式（前端）
+const RISK_PATTERNS = [
+  { pattern: /\b[A-Z][a-z]+ [A-Z][a-z]+\b/g, message: '可能包含人名' },
+  { pattern: /spider[- ]?man|batman|superman|iron man/i, message: '包含超級英雄角色' },
+  { pattern: /mickey|pokemon|hello kitty/i, message: '包含卡通角色' },
+  { pattern: /nike|adidas|coca[- ]?cola|mcdonalds/i, message: '包含品牌名稱' },
+  { pattern: /mona lisa|starry night/i, message: '包含知名藝術作品' }
+];
+
+const promptInput = document.getElementById('prompt');
+const promptWarning = document.getElementById('prompt-warning');
+
+prompInput.addEventListener('input', () => {
+  const text = promptInput.value;
+  const risks = [];
+  
+  for (const {pattern, message} of RISK_PATTERNS) {
+    if (pattern.test(text)) {
+      risks.push(message);
+    }
+  }
+  
+  if (risks.length > 0) {
+    promptWarning.style.display = 'block';
+    promptWarning.innerHTML = '⚠️ 檢測到敏感內容：' + risks.join('、') + '<br>系統會自動清理這些內容。';
+    promptInput.classList.add('warning');
+  } else {
+    promptWarning.style.display = 'none';
+    promptInput.classList.remove('warning');
+  }
+});
+
 const uploadZone = document.getElementById('upload-zone');
 ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
   uploadZone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); });
@@ -516,7 +626,7 @@ async function generate() {
   const result = document.getElementById('result');
   btn.disabled = true;
   btn.innerHTML = '<span class="loading"></span> 生成中...';
-  result.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">正在生成圖像，如遇配額限制會自動切換賬號...</div>';
+  result.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">正在生成圖像，智能處理中...</div>';
   
   try {
     const form = new FormData();
@@ -553,19 +663,29 @@ async function generate() {
     }
     
     const data = await res.json();
-    console.log('Response data received');
+    console.log('Response data received', data);
     
     if (data.error) throw new Error(data.error.message);
     
     if (data.data && data.data[0]) {
       const imgSrc = 'data:image/png;base64,' + data.data[0].b64_json;
       const accountUsed = data.account_used || '未知';
+      const promptModified = data.prompt_modified;
       
-      result.innerHTML = '<div style="background:var(--card);padding:20px;border-radius:10px;border:1px solid var(--border)"><div style="margin-bottom:12px;font-weight:600;color:var(--success)">✅ 生成成功！（使用賬號 ' + accountUsed + '）</div><img src="' + imgSrc + '" class="result-image"><div style="margin-top:16px"><a href="' + imgSrc + '" download="flux2-' + Date.now() + '.png" style="color:var(--primary);text-decoration:none;font-weight:600">📥 下載圖片</a></div></div>';
+      let modificationNotice = '';
+      if (promptModified) {
+        modificationNotice = '<div style="margin-bottom:12px;padding:10px;background:rgba(245,158,11,.1);border:1px solid var(--warning);border-radius:6px;font-size:12px;color:var(--warning)">🛡️ 提示詞已自動清理敏感內容</div>';
+      }
+      
+      result.innerHTML = '<div style="background:var(--card);padding:20px;border-radius:10px;border:1px solid var(--border)">' + modificationNotice + '<div style="margin-bottom:12px;font-weight:600;color:var(--success)">✅ 生成成功！（使用賬號 ' + accountUsed + '）</div><img src="' + imgSrc + '" class="result-image"><div style="margin-top:16px"><a href="' + imgSrc + '" download="flux2-' + Date.now() + '.png" style="color:var(--primary);text-decoration:none;font-weight:600">📥 下載圖片</a></div></div>';
     }
   } catch (e) {
     console.error('Error:', e);
-    result.innerHTML = '<div style="padding:20px;background:rgba(239,68,68,.1);border-radius:10px;color:#ef4444">❌ 錯誤：' + e.message + '<br><br>請查看瀏覽器控制台獲取詳細信息</div>';
+    let errorMsg = e.message;
+    if (errorMsg.includes('審核') || errorMsg.includes('flagged')) {
+      errorMsg = '提示詞被內容審核攻擊。<br><br>🚨 請避免使用：<br>• 名人名字<br>• 受版權角色<br>• 品牌名稱<br>• 知名藝術作品<br><br>💡 建議使用通用描述，例如："a person"、"a hero"、"a landscape"';
+    }
+    result.innerHTML = '<div style="padding:20px;background:rgba(239,68,68,.1);border-radius:10px;color:#ef4444">❌ 錯誤：' + errorMsg + '</div>';
   } finally {
     btn.disabled = false;
     btn.innerHTML = '✨ 生成圖像';
@@ -575,9 +695,7 @@ async function generate() {
 </body>
 </html>`;
   
-  return new Response(html, {
-    headers: { 'Content-Type': 'text/html; charset=utf-8' }
-  });
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
 
 function jsonError(msg, status) {
